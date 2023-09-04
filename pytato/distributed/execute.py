@@ -109,7 +109,9 @@ def execute_distributed_partition(
     if input_args is None:
         input_args = {}
 
-    from mpi4py import MPI
+    #from mpi4py import MPI
+    import commi
+    mpi_communicator = commi.COMM_WORLD
 
     if any(part.name_to_recv_node for part in partition.parts.values()):
         recv_names_tup, recv_requests_tup, recv_buffers_tup = zip(*[
@@ -181,7 +183,9 @@ def execute_distributed_partition(
         pids_to_execute.remove(part.pid)
 
     def wait_for_some_recvs() -> None:
-        complete_recv_indices = MPI.Request.Waitsome(recv_requests)
+        #complete_recv_indices = MPI.Request.Waitsome(recv_requests)
+        import commi
+        complete_recv_indices = commi.request.Waitsome(recv_requests)
 
         # Waitsome is allowed to return None
         if not complete_recv_indices:
