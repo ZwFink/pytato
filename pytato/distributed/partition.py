@@ -1,4 +1,7 @@
 """
+Partitioning
+------------
+
 Partitioning of graphs in :mod:`pytato` serves to enable
 :ref:`distributed computation <distributed>`, i.e. sending and receiving data
 as part of graph evaluation.
@@ -9,6 +12,15 @@ Partitioning of expression graphs is based on a few assumptions:
 - Parts are compiled at partitioning time, so what inputs they take from memory
   vs. what they compute is decided at that time.
 - No part may depend on its own outputs as inputs.
+
+.. currentmodule:: pytato
+
+.. autoclass:: DistributedGraphPart
+.. autoclass:: DistributedGraphPartition
+
+.. autofunction:: find_distributed_partition
+
+.. currentmodule:: pytato.distributed.partition
 
 Internal stuff that is only here because the documentation tool wants it
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -21,13 +33,6 @@ Internal stuff that is only here because the documentation tool wants it
 
     An alias for
     ``Mapping[CommunicationOpIdentifier, AbstractSet[CommunicationOpIdentifier]]``.
-
-.. currentmodule:: pytato
-
-.. autoclass:: DistributedGraphPart
-.. autoclass:: DistributedGraphPartition
-
-.. autofunction:: find_distributed_partition
 """
 
 from __future__ import annotations
@@ -241,13 +246,24 @@ class DistributedGraphPartition:
 
         Mapping from part IDs to instances of :class:`DistributedGraphPart`.
 
-    .. attribute:: var_name_to_result
+    .. attribute:: name_to_output
 
        Mapping of placeholder names to the respective :class:`pytato.array.Array`
-       they represent.
+       they represent. This is where the actual expressions are stored, for
+       all parts. Observe that the :class:`DistributedGraphPart`, for the most
+       part, only stores names. These "outputs" may be 'part outputs' (i.e.
+       data computed in one part for use by another, effectively tempoarary
+       variables), or 'overall outputs' of the comutation.
+
+    .. attribute:: overall_output_names
+
+        The names of the outputs (in :attr:`name_to_output`) that were given to
+        :func:`find_distributed_partition` to specify the overall computaiton.
+
     """
     parts: Mapping[PartId, DistributedGraphPart]
-    var_name_to_result: Mapping[str, Array]
+    name_to_output: Mapping[str, Array]
+    overall_output_names: Sequence[str]
 
 # }}}
 
@@ -262,14 +278,15 @@ class _DistributedInputReplacer(CopyMapper):
 
     def __init__(self,
                  recvd_ary_to_name: Mapping[Array, str],
-                 mptpo_ary_to_name: Mapping[Array, str],
-                 part_outputs: Mapping[str, Array],
+                 sptpo_ary_to_name: Mapping[Array, str],
+                 name_to_output: Mapping[str, Array],
                  ) -> None:
         super().__init__()
 
         self.recvd_ary_to_name = recvd_ary_to_name
-        self.mptpo_ary_to_name = mptpo_ary_to_name
-        self.part_outputs = part_outputs
+        self.sptpo_ary_to_name = sptpo_ary_to_name
+        self.name_to_output = name_to_output
+        self.output_arrays = frozenset(name_to_output.values())
 
         self.user_input_names: Set[str] = set()
         self.partition_input_name_to_placeholder: Dict[str, Placeholder] = {}
@@ -310,20 +327,20 @@ class _DistributedInputReplacer(CopyMapper):
 
         key = self.get_cache_key(expr)
         try:
-            return cast(ArrayOrNames, self._cache[key])
+            return self._cache[key]
         except KeyError:
             pass
 
         # If the array is an output from the current part, it would
         # be counterproductive to turn it into a placeholder: we're
         # the ones who are supposed to compute it!
-        if expr not in self.part_outputs.values():
+        if expr not in self.output_arrays:
 
             name = self.recvd_ary_to_name.get(expr)
             if name is not None:
                 return self._get_placeholder_for(name, expr)
 
-            name = self.mptpo_ary_to_name.get(expr)
+            name = self.sptpo_ary_to_name.get(expr)
             if name is not None:
                 return self._get_placeholder_for(name, expr)
 
@@ -352,24 +369,25 @@ class _PartCommIDs:
 # {{{ _make_distributed_partition
 
 def _make_distributed_partition(
-        outputs_per_part: Sequence[Mapping[str, Array]],
+        name_to_output_per_part: Sequence[Mapping[str, Array]],
         part_comm_ids: Sequence[_PartCommIDs],
         recvd_ary_to_name: Mapping[Array, str],
         sent_ary_to_name: Mapping[Array, str],
-        mptpo_ary_to_name: Mapping[Array, str],
+        sptpo_ary_to_name: Mapping[Array, str],
         local_recv_id_to_recv_node: Dict[CommunicationOpIdentifier, DistributedRecv],
         local_send_id_to_send_node: Dict[CommunicationOpIdentifier, DistributedSend],
+        overall_output_names: Sequence[str],
         ) -> DistributedGraphPartition:
-    var_name_to_result = {}
+    name_to_output = {}
     parts: Dict[PartId, DistributedGraphPart] = {}
 
-    for part_id, part_outputs in enumerate(outputs_per_part):
+    for part_id, name_to_ouput in enumerate(name_to_output_per_part):
         comm_replacer = _DistributedInputReplacer(
-            recvd_ary_to_name, mptpo_ary_to_name, part_outputs)
+            recvd_ary_to_name, sptpo_ary_to_name, name_to_ouput)
 
-        for name, val in part_outputs.items():
-            assert name not in var_name_to_result
-            var_name_to_result[name] = comm_replacer(val)
+        for name, val in name_to_ouput.items():
+            assert name not in name_to_output
+            name_to_output[name] = comm_replacer(val)
 
         comm_ids = part_comm_ids[part_id]
 
@@ -386,7 +404,7 @@ def _make_distributed_partition(
                 user_input_names=frozenset(comm_replacer.user_input_names),
                 partition_input_names=frozenset(
                     comm_replacer.partition_input_name_to_placeholder.keys()),
-                output_names=frozenset(part_outputs.keys()),
+                output_names=frozenset(name_to_ouput.keys()),
                 name_to_recv_node=Map({
                     recvd_ary_to_name[local_recv_id_to_recv_node[recv_id]]:
                     local_recv_id_to_recv_node[recv_id]
@@ -395,7 +413,8 @@ def _make_distributed_partition(
 
     result = DistributedGraphPartition(
             parts=parts,
-            var_name_to_result=var_name_to_result,
+            name_to_output=name_to_output,
+            overall_output_names=overall_output_names,
             )
 
     return result
@@ -619,113 +638,86 @@ def find_distributed_partition(
     ``a``, the communication operation identified by
     :class:`~pytato.distributed.partition.CommunicationOpIdentifier` ``b`` must
     be completed.
-
     I.e. the nodes are "communication operations", i.e. pairs of
     send/receive. Edges represent (rank-local) data flow between them.
 
     .. rubric:: Step 1: Build a global graph of data flow between communication
         operations
 
-    On rank ``i``, collect the receives that have a data flow to that send
-    in a :class:`~pytato.distributed.partition.CommunicationDepGraph`
-    ``local_comm_ids_to_needed_comm_ids data structure``
+    As a first step, each rank receives a copy of global
+    :class:`~pytato.distributed.partition.CommunicationDepGraph`, as described
+    above. This becomes ``comm_ids_to_needed_comm_ids``.
 
-    Let ``gathered_local_send_to_needed_local_recvs[i]`` be the
-    ``local_comm_ids_to_needed_comm_ids`` gathered on rank ``i``. Since each
-    send is carried out by exactly one rank, :math:`\bigcup_i`
-    ``gathered_local_send_to_needed_local_recvs[i].keys()`` is disjoint, and
-    thus simply combining all the dictionaries by key yields the rank-global
-    graph of data flow between communication operations.
+    .. rubric:: Step 2: Obtain a "schedule" of "communication batches"
 
-    Using allreduce (with disjoint union of :class:`dict` as the operation) of
-    the local-pieces, this global graph will be conveyed to each rank. Each
-    rank will then have the same global
-    :class:`~pytato.distributed.partition.CommunicationDepGraph`
-    ``comm_ids_to_needed_comm_ids``.
-
-    .. rubric:: Step 2: Collect rank-local sends needed by each receive
-
-    On rank ``i``, do the following:
-
-    For each communicaton operation with destination rank ``i`` (i.e., from
-    the point of view of rank ``i``, a receive), (recursively) find all
-    needed communications with source rank ``i`` (i.e., from the point of
-    view of rank ``i``, a send). Record these in
-    :class:`~pytato.distributed.partition.CommunicationDepGraph`
-    ``local_recv_id_to_needed_local_send_ids``.
-
-    .. rubric:: Step 3: Obtain a rank-local communication dependency graph
-
-    On rank ``i``, do the following:
-
-    Define :class:`~pytato.distributed.partition.CommunicationDepGraph`
-    ``local_comm_to_needed_local_comms`` as the key-wise disjoint union of
-    ``local_comm_ids_to_needed_comm_ids`` and
-    ``local_recv_id_to_needed_local_send_ids``.
-
-    This graph now carries globally valid information on dependencies
-    between communication operations taking place on the local rank.
-
-    .. rubric:: Step 4: Partition the graph of local communication ops
-
-    On rank ``i``, do the following:
-
-    Compute a topological order of ``local_comm_to_needed_local_comms``.
-
-    Starting from a single communication operation, greedily pack additional
-    communication operations into the current part if:
-
-    -  the additional operation is a send
-    -  the additional operation is a receive that does not “need” (according
-        to ``local_recv_id_to_needed_local_send_ids``) a send in the current part.
-        Partitions *outputs* into parts. Between two parts communication
-        statements (sends/receives) are scheduled.
-
-    """
-    # FIXME: Massage salvageable bits from old docstring into new.
-    """
-    -------
+    On rank 0, compute and broadcast a topological order of
+    ``comm_ids_to_needed_comm_ids``. The result of this is
+    ``comm_batches``, a sequence of sets of
+    :class:`~pytato.distributed.partition.CommunicationOpIdentifier`
+    instances, identifying sets of communication operations expected
+    to complete *between* parts of the computation. (I.e. computation
+    will occur before the first communication batch, then between the
+    first and second, and so on.)
 
     .. note::
 
-        The partitioning of a DAG generally does not have a unique solution.
-        The heuristic employed by this partitioner is as follows:
+        An important restriction of this scheme is that a linear order
+        of communication batches is obtained, meaning that, typically,
+        no overlap of computation and communication occurs.
 
-        1. The data contained in :class:`~pytato.DistributedSend` are marked as
-           *mandatory part outputs*.
-        2. Based on the dependencies in *outputs*, a DAG is constructed with
-           only the mandatory part outputs as the nodes.
-        3. Using a topological sort the mandatory part outputs are assigned a
-           "time" (an integer) such that evaluating these outputs at that time
-           would preserve dependencies. We maximize the number of part outputs
-           scheduled at a each "time". This requirement ensures our topological
-           sort is deterministic.
-        4. We then turn our attention to the other arrays that are allocated to a
-           buffer. These are the materialized arrays and belong to one of the
-           following classes:
-           - An :class:`~pytato.Array` tagged with :class:`pytato.tags.ImplStored`.
-           - The expressions in a :class:`~pytato.DictOfNamedArrays`.
-        5. Based on *outputs*, we compute the predecessors of a materialized
-           that were a part of the mandatory part outputs. A materialized array
-           is scheduled to be evaluated in a part as soon as all of its inputs
-           are available. Note that certain inputs (like
-           :class:`~pytato.DistributedRecv`) might not be available until
-           certain mandatory part outputs have been evaluated.
-        6. From *outputs*, we can construct a DAG comprising only of mandatory
-           part outputs and materialized arrays. We mark all materialized
-           arrays that are being used by nodes in a part that's not the one in
-           which the materialized array itself was evaluated. Such materialized
-           arrays are also realized as part outputs. This is done to avoid
-           recomputations.
+    .. rubric:: Step 3: Create rank-local part descriptors
 
-        Knobs to tweak the partition:
+    On each rank, we next rewrite the communication batches into computation
+    parts, each identified by a ``_PartCommIDs`` structure, which
+    gathers receives that need to complete *before* the computation on a part
+    can begin and sends that can begin once computation on a part
+    is complete.
 
-        1. By removing dependencies between the mandatory part outputs, the
-           resulting DAG would lead to fewer number of parts and parts with
-           more number of nodes in them. Similarly, adding dependencies between
-           the part outputs would lead to smaller parts.
-        2. Tagging nodes with :class:~pytato.tags.ImplStored` would help in
-           avoiding re-computations.
+    .. rubric:: Step 4: Assign materialized arrays to parts
+
+    "Stored" arrays are those whose value will be computed and stored
+    in memory. This includes the following:
+
+    - Arrays tagged :class:`~pytato.tags.ImplStored` by prior processing of the DAG,
+    - arrays being sent (because we need to hand a buffer to MPI),
+    - arrays being received (because MPI puts the received data
+      in memory)
+    - Overall outputs of the computation.
+
+    By contrast, the code below uses the word "materialized" only for arrays of
+    the first type (tagged :class:`~pytato.tags.ImplStored`), so that 'stored' is a
+    superset of 'materialized'.
+
+    In addition, data computed by one *part* (in the above sense) of the
+    computation and used by another must be in memory. Evaluating and storing
+    temporary arrays is expensive, and so we try to minimize the number of
+    times that that this occurs as part of the partitioning.  This is done by
+    relying on already-stored arrays as much as possible and recomputing any
+    intermediate results needed in, say, an originating and a consuming part.
+
+    We begin this process by assigning each materialized
+    array to a part in which it is computed, based on the part in which
+    data depending on such arrays is sent. This choice implies that these
+    computations occur as late as possible.
+
+    .. rubric:: Step 5: Promote stored arrays to part outputs if needed
+
+    In :class:`DistributedGraphPart`, our description of the partitioned
+    computation, each part can declare named 'outputs' that can be used
+    by subsequent parts. Stored arrays are promoted to part outputs
+    if they have users in parts other than the one in which they
+    are computed.
+
+    .. rubric:: Step 6:: Rewrite the DAG into its parts
+
+    In the final step, we traverse the DAG to apply the following changes:
+
+    - Replace :class:`DistributedRecv` nodes with placeholders for names
+      assigned in :attr:`DistributedGraphPart.name_to_recv_node`.
+    - Replace references to out-of-part stored arrays with
+      :class:`~pytato.array.Placeholder` instances.
+    - Gather sent arrays into
+      assigned in :attr:`DistributedGraphPart.name_to_send_nodes`.
     """
     from pytato.transform import SubsetDependencyMapper
 
@@ -826,7 +818,7 @@ def find_distributed_partition(
 
     # }}}
 
-    # {{{ assign each materialized array to a part
+    # {{{ assign each compulsorily materialized array to a part
 
     materialized_arrays_collector = _MaterializedArrayCollector()
     materialized_arrays_collector(outputs)
@@ -919,7 +911,7 @@ def find_distributed_partition(
 
     stored_arrays = _OrderedSet(stored_ary_to_part_id)
 
-    # {{{ find which materialized arrays should become part outputs
+    # {{{ find which stored arrays should become part outputs
     # (because they are used in not just their local part, but also others)
 
     direct_preds_getter = DirectPredecessorsGetter()
@@ -933,12 +925,12 @@ def find_distributed_partition(
                 materialized_preds |= get_materialized_predecessors(pred)
         return materialized_preds
 
-    materialized_arrays_promoted_to_part_outputs = {
-                materialized_pred
+    stored_arrays_promoted_to_part_outputs = {
+                stored_pred
                 for stored_ary in stored_arrays
-                for materialized_pred in get_materialized_predecessors(stored_ary)
+                for stored_pred in get_materialized_predecessors(stored_ary)
                 if (stored_ary_to_part_id[stored_ary]
-                    != stored_ary_to_part_id[materialized_pred])
+                    != stored_ary_to_part_id[stored_pred])
                 }
 
     # }}}
@@ -961,34 +953,35 @@ def find_distributed_partition(
         ary: gen_array_name(ary)
         for ary in received_arrays}
 
-    outputs_per_part: List[Dict[str, Array]] = [{} for _pid in range(nparts)]
+    name_to_output_per_part: List[Dict[str, Array]] = [{} for _pid in range(nparts)]
 
     for name, ary in outputs._data.items():
         pid = stored_ary_to_part_id[ary]
-        outputs_per_part[pid][name] = ary
+        name_to_output_per_part[pid][name] = ary
 
     sent_ary_to_name: Dict[Array, str] = {}
     for ary in sent_arrays:
         pid = stored_ary_to_part_id[ary]
         name = gen_array_name(ary)
         sent_ary_to_name[ary] = name
-        outputs_per_part[pid][name] = ary
+        name_to_output_per_part[pid][name] = ary
 
-    mptpo_ary_to_name: Dict[Array, str] = {}
-    for ary in materialized_arrays_promoted_to_part_outputs:
+    sptpo_ary_to_name: Dict[Array, str] = {}
+    for ary in stored_arrays_promoted_to_part_outputs:
         pid = stored_ary_to_part_id[ary]
         name = gen_array_name(ary)
-        mptpo_ary_to_name[ary] = name
-        outputs_per_part[pid][name] = ary
+        sptpo_ary_to_name[ary] = name
+        name_to_output_per_part[pid][name] = ary
 
     partition = _make_distributed_partition(
-            outputs_per_part,
+            name_to_output_per_part,
             part_comm_ids,
             recvd_ary_to_name,
             sent_ary_to_name,
-            mptpo_ary_to_name,
+            sptpo_ary_to_name,
             lsrdg.local_recv_id_to_recv_node,
-            lsrdg.local_send_id_to_send_node)
+            lsrdg.local_send_id_to_send_node,
+            tuple(outputs))
 
     from pytato.distributed.verify import _run_partition_diagnostics
     _run_partition_diagnostics(outputs, partition)

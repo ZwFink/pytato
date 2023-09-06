@@ -122,7 +122,8 @@ def number_distributed_tags(
                     )
                 for pid, part in partition.parts.items()
                 },
-            var_name_to_result=partition.var_name_to_result,
+            name_to_output=partition.name_to_output,
+            overall_output_names=partition.overall_output_names,
             ), next_tag
 
 # }}}

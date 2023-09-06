@@ -1,4 +1,7 @@
 """
+Verification
+------------
+
 .. autoexception:: PartitionInducedCycleError
 
 .. currentmodule:: pytato
@@ -152,7 +155,7 @@ def _check_partition_disjointness(partition: DistributedGraphPartition) -> None:
     for part in partition.parts.values():
         mapper = _SeenNodesWalkMapper()
         for out_name in part.output_names:
-            mapper(partition.var_name_to_result[out_name])
+            mapper(partition.name_to_output[out_name])
 
         # FIXME This check won't do much unless we successfully visit
         # all the nodes, but we're not currently checking that.
@@ -185,7 +188,7 @@ def _run_partition_diagnostics(
 
     from pytato.analysis import get_num_nodes
     num_nodes_per_part = [get_num_nodes(make_dict_of_named_arrays(
-            {x: gp.var_name_to_result[x] for x in part.output_names}))
+            {x: gp.name_to_output[x] for x in part.output_names}))
             for part in gp.parts.values()]
 
     logger.info(f"find_partition: Split {get_num_nodes(outputs)} nodes into "

@@ -27,11 +27,6 @@ Stringifying Expression Graphs
 
 .. _distributed:
 
-Support for Distributed-Memory/Message Passing
-==============================================
-
-.. automodule:: pytato.distributed
-
 Utilities and Diagnostics
 =========================
 

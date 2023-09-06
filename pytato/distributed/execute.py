@@ -1,4 +1,6 @@
 """
+Execution
+---------
 .. currentmodule:: pytato
 
 .. autofunction:: execute_distributed_partition
@@ -65,7 +67,7 @@ def generate_code_for_partition(partition: DistributedGraphPartition) \
     for part in sorted(partition.parts.values(),
                        key=lambda part_: sorted(part_.output_names)):
         d = make_dict_of_named_arrays(
-                    {var_name: partition.var_name_to_result[var_name]
+                    {var_name: partition.name_to_output[var_name]
                         for var_name in part.output_names
                      })
         part_id_to_prg[part.pid] = generate_loopy(d)
@@ -233,7 +235,7 @@ def execute_distributed_partition(
             assert count == 0
             assert name not in context
 
-    return context
+    return {name: context[name] for name in partition.overall_output_names}
 
 # }}}
 
