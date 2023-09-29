@@ -86,6 +86,8 @@ def _post_receive(mpi_communicator: mpi4py.MPI.Comm,
 
     assert isinstance(recv.comm_tag, int)
     # mypy is right here, size params in 'recv.shape' must be evaluated
+    # TODO: Check that the tags are the same here, that senders are sending
+    # to those who are receiving, etc.
     buf = np.empty(recv.shape, dtype=recv.dtype)  # type: ignore[arg-type]
 
     return mpi_communicator.Irecv(
@@ -110,10 +112,6 @@ def execute_distributed_partition(
 
     if input_args is None:
         input_args = {}
-
-    #from mpi4py import MPI
-    import commi
-    mpi_communicator = commi.COMM_WORLD
 
     if any(part.name_to_recv_node for part in partition.parts.values()):
         recv_names_tup, recv_requests_tup, recv_buffers_tup = zip(*[
@@ -206,6 +204,7 @@ def execute_distributed_partition(
 
     # {{{ main loop
 
+    round_trips = 0
     while pids_to_execute:
         ready_pids = {pid
                 for pid in pids_to_execute

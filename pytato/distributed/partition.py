@@ -587,15 +587,16 @@ class _MaterializedArrayCollector(CachedWalkMapper):
 
 # {{{ _set_dict_union_mpi
 
-def _set_dict_union_mpi(
-        dict_a: Mapping[_KeyT, FrozenSet[_ValueT]],
-        dict_b: Mapping[_KeyT, FrozenSet[_ValueT]],
-        mpi_data_type: mpi4py.MPI.Datatype) -> Mapping[_KeyT, FrozenSet[_ValueT]]:
-    assert mpi_data_type is None
+def _set_dict_union_mpi(dicts) -> Mapping[_KeyT, FrozenSet[_ValueT]]:
+    dict_a = dicts[0]
     result = dict(dict_a)
-    for key, values in dict_b.items():
-        result[key] = result.get(key, frozenset()) | values
+    for dict_b in dicts[1:]:
+        for key, values in dict_b.items():
+            result[key] = result.get(key, frozenset()) | values
     return result
+
+from charm4py import Reducer
+Reducer.addReducer(_set_dict_union_mpi)
 
 # }}}
 
@@ -732,17 +733,8 @@ def find_distributed_partition(
     local_comm_ids_to_needed_comm_ids = \
             lsrdg.local_comm_ids_to_needed_comm_ids
 
-    set_dict_union_mpi_op = MPI.Op.Create(
-            # type ignore reason: mpi4py misdeclares op functions as returning
-            # None.
-            _set_dict_union_mpi,  # type: ignore[arg-type]
-            commute=True)
-    try:
-        comm_ids_to_needed_comm_ids = mpi_communicator.allreduce(
-                local_comm_ids_to_needed_comm_ids, set_dict_union_mpi_op)
-    finally:
-        set_dict_union_mpi_op.Free()
-
+    comm_ids_to_needed_comm_ids = mpi_communicator.owlreduce(local_comm_ids_to_needed_comm_ids, 
+                                                                 Reducer._set_dict_union_mpi)
     # }}}
 
     # {{{ make batches out of comm_ids_to_needed_comm_ids

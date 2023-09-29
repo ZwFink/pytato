@@ -41,6 +41,14 @@ if TYPE_CHECKING:
 
 
 # {{{ construct tag numbering
+def _set_union(contribs):
+    base = contribs[0]
+    for contrib in contribs[1:]:
+        base |= contrib
+    return base
+
+from charm4py import Reducer
+Reducer.addReducer(_set_union)
 
 def number_distributed_tags(
         mpi_communicator: mpi4py.MPI.Comm,
@@ -70,29 +78,25 @@ def number_distributed_tags(
             for sends in part.name_to_send_nodes.values()
             for send in sends})
 
-    from mpi4py import MPI
+    # def set_union(
+    #         set_a: FrozenSet[Any], set_b: FrozenSet[Any],
+    #         mpi_data_type: MPI.Datatype) -> FrozenSet[str]:
+    #     assert mpi_data_type is None
+    #     assert isinstance(set_a, frozenset)
+    #     assert isinstance(set_b, frozenset)
 
-    def set_union(
-            set_a: FrozenSet[Any], set_b: FrozenSet[Any],
-            mpi_data_type: MPI.Datatype) -> FrozenSet[str]:
-        assert mpi_data_type is None
-        assert isinstance(set_a, frozenset)
-        assert isinstance(set_b, frozenset)
-
-        return set_a | set_b
+    #     return set_a | set_b
 
     root_rank = 0
 
-    set_union_mpi_op = MPI.Op.Create(
-            # type ignore reason: mpi4py misdeclares op functions as returning
-            # None.
-            set_union,  # type: ignore[arg-type]
-            commute=True)
-    try:
-        all_tags = mpi_communicator.reduce(
-                tags, set_union_mpi_op, root=root_rank)
-    finally:
-        set_union_mpi_op.Free()
+    # set_union_mpi_op = MPI.Op.Create(
+            # # type ignore reason: mpi4py misdeclares op functions as returning
+            # # None.
+            # set_union,  # type: ignore[arg-type]
+            # commute=True)
+    all_tags = mpi_communicator.redux(tags, Reducer._set_union, root=root_rank)
+    # all_tags = mpi_communicator.reduce(
+        # tags, set_union_mpi_op, root=root_rank)
 
     if mpi_communicator.rank == root_rank:
         sym_tag_to_int_tag = {}
